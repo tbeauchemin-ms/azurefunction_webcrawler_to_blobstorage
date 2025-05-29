@@ -6,6 +6,7 @@ import json
 import logging
 import requests
 import hashlib
+from collections import deque
 from io import BytesIO
 from urllib.parse import urlparse, urljoin, urlunparse
 from urllib import robotparser
@@ -23,7 +24,6 @@ from docx import Document as DocxDocument
 import pandas as pd
 
 # ----------- Logging and Env Config -----------
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 os_env = os.getenv
 STORAGE_ACCOUNT = os.environ["STORAGE_ACCOUNT_NAME"]
@@ -70,7 +70,6 @@ def sanitize(text):
     return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").lower()
 
 def normalize_url(url):
-    """Lowercase scheme/netloc; DO NOT lowercase path!"""
     p = urlparse(url)
     scheme = "https"
     netloc = p.netloc.lower().replace("www.", "")
@@ -123,7 +122,7 @@ def upload_json(data, blob_name, container, last_modified=None):
             props = blob_client.get_blob_properties()
             blob_lastmod = props.metadata.get("last_modified") if props.metadata else None
             if last_modified and blob_lastmod == last_modified:
-                logging.info(f"Skipping unchanged content: {blob_name}")
+                logging.debug(f"Skipping unchanged content: {blob_name}")
                 return False
         blob_client.upload_blob(
             data=payload,
@@ -206,7 +205,6 @@ def extract_real_link(base_url, href):
         m = JS_OPEN_RE.search(href)
         if m:
             relative_url = m.group(2)
-            # Ignore .doc and .xls
             if relative_url.lower().endswith((".doc", ".xls")):
                 return None
             return normalize_url(urljoin(base_url, relative_url))
@@ -215,7 +213,7 @@ def extract_real_link(base_url, href):
     else:
         return normalize_url(urljoin(base_url, href))
 
-# ----------- Handlers for Files/Pages ------------
+# ----------- Handlers for Files/Pages (same as before) -----------
 
 def handle_docx(url: str):
     norm_url = normalize_url(url)
@@ -361,7 +359,7 @@ def handle_pdf(playwright_ctx, url: str):
             sitemap_urls.append(norm_url)
     return []
 
-# ----------- Main HTML Handler with Logging -----------
+# ----------- Main HTML Handler (returns child links) -----------
 
 def enforce_trailing_slash_if_directory(url):
     return url
@@ -419,12 +417,13 @@ def handle_page(playwright_ctx, url: str):
             real = extract_real_link(url, l)
             if real:
                 absolute_links.append(real)
-        logging.info(f"All absolute links found on {url}: {absolute_links}")
+        logging.debug(f"All absolute links found on {url}: {absolute_links}")
 
-        # Log filtering
-        for l in absolute_links:
-            logging.info(f"Filter: {l} | allowed: {is_allowed_link(l)}, skip: {should_skip(l)}, visited: {l in visited}")
-
+        filtered_links = [
+            l for l in set(absolute_links)
+            if is_allowed_link(l) and not should_skip(l)
+        ]
+        logging.info(f"Filtered to {len(filtered_links)} crawlable links on {url}")
         if not resp:
             with collection_lock:
                 failed.append({"url": url, "reason": "No response from server"})
@@ -459,11 +458,6 @@ def handle_page(playwright_ctx, url: str):
         with collection_lock:
             documents.append(rec)
             sitemap_urls.append(norm_url)
-        filtered_links = [
-            l for l in set(absolute_links)
-            if is_allowed_link(l) and not should_skip(l)
-        ]
-        logging.info(f"Filtered to {len(filtered_links)} crawlable links on {url}: {filtered_links}")
         return filtered_links
     except Exception as e:
         logging.warning(f"General error handling HTML {url}: {e}")
@@ -473,50 +467,57 @@ def handle_page(playwright_ctx, url: str):
     finally:
         pg.close()
 
-# ----------- Crawler Recursion/Walk -----------
+# ----------- BFS Crawler (Queue-based, No Duplication) -----------
 
-def walk(playwright_ctx, url: str, depth=0):
-    norm_url = normalize_url(url)
-    logging.info("Visiting: %s (depth %d)", norm_url, depth)
-    with collection_lock:
-        if (norm_url in visited
-            or depth >= MAX_DEPTH
-            or should_skip(norm_url)
-            or (RESPECT_ROBOTS and not robot_allows(norm_url, USER_AGENT))):
-            if norm_url in visited:
-                logging.info(f"Already visited: {norm_url}")
-            if depth >= MAX_DEPTH:
-                logging.info(f"Max depth reached: {norm_url}")
-            if should_skip(norm_url):
-                logging.info(f"Skipped by regex: {norm_url}")
-            if (RESPECT_ROBOTS and not robot_allows(norm_url, USER_AGENT)):
-                logging.info(f"Blocked by robots.txt: {norm_url}")
-            return
-        visited.add(norm_url)
+def bfs_crawl(seed_urls):
+    global visited
+    queue = deque()
+    for seed_url in seed_urls:
+        norm_seed = normalize_url(seed_url)
+        if norm_seed not in visited:
+            queue.append((seed_url, 0))
+            visited.add(norm_seed)
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+        context_opts = {
+            "user_agent": USER_AGENT,
+            "locale": "en-US",
+            "accept_downloads": True,
+            "java_script_enabled": True,
+        }
+        ctx = browser.new_context(**context_opts)
+        while queue:
+            url, depth = queue.popleft()
+            norm_url = normalize_url(url)
+            if depth > MAX_DEPTH:
+                continue
+            if should_skip(norm_url) or (RESPECT_ROBOTS and not robot_allows(norm_url, USER_AGENT)):
+                logging.debug(f"Skipping {norm_url} by filter or robots.txt")
+                continue
 
-    try:
-        if norm_url.endswith(".pdf"):
-            handle_pdf(playwright_ctx, url)
-        elif norm_url.endswith(".docx"):
-            handle_docx(url)
-        elif norm_url.endswith(".xlsx"):
-            handle_xlsx(url)
-        elif norm_url.endswith(".doc"):
-            logging.info("Skipping .doc (not supported reliably in Python)")
-            return
-        elif norm_url.endswith(".xls"):
-            logging.info("Skipping .xls (old Excel format, add xlrd if needed)")
-            return
-        else:
-            links = handle_page(playwright_ctx, url)
-            logging.info(f"Following {len(links)} child links from {url}")
-            for link in links:
-                time.sleep(REQUEST_DELAY)
-                walk(playwright_ctx, link, depth + 1)
-    except Exception as e:
-        logging.warning(f"walk error on {url}: {e}")
-        with collection_lock:
-            failed.append({"url": url, "reason": f"Walk error: {e}"})
+            # Handle different filetypes
+            if norm_url.endswith(".pdf"):
+                handle_pdf(ctx, url)
+            elif norm_url.endswith(".docx"):
+                handle_docx(url)
+            elif norm_url.endswith(".xlsx"):
+                handle_xlsx(url)
+            elif norm_url.endswith(".doc") or norm_url.endswith(".xls"):
+                logging.debug(f"Skipping unsupported Office format: {norm_url}")
+            else:
+                links = handle_page(ctx, url)
+                logging.info(f"Crawled: {norm_url} (depth={depth}), found {len(links)} links")
+                # Add new links to queue if not already visited
+                for link in links:
+                    norm_link = normalize_url(link)
+                    if norm_link not in visited:
+                        queue.append((link, depth + 1))
+                        visited.add(norm_link)
+            time.sleep(REQUEST_DELAY)
+        browser.close()
 
 # ----------- Entry Point ------------
 
@@ -535,22 +536,8 @@ def start_crawl():
             else:
                 logging.info("⚠️  No sitemap for %s; falling back to seed", seed)
                 urls.append(seed)
-        logging.info("🚀 Starting crawl with %d starting URLs", len(urls))
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"]
-            )
-            context_opts = {
-                "user_agent": USER_AGENT,
-                "locale": "en-US",
-                "accept_downloads": True,
-                "java_script_enabled": True,
-            }
-            ctx = browser.new_context(**context_opts)
-            for url in urls:
-                walk(ctx, url)
-            browser.close()
+        logging.info("🚀 Starting BFS crawl with %d starting URLs", len(urls))
+        bfs_crawl(urls)
     except Exception as e:
         logging.error(f"Crawl failed: {e}", exc_info=True)
     finally:
