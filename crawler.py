@@ -14,7 +14,7 @@ from threading import Lock
 from xml.etree import ElementTree as ET
 from readability import Document
 from bs4 import BeautifulSoup
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from PyPDF2 import PdfReader
@@ -26,33 +26,44 @@ import pandas as pd
 # ----------- Logging and Env Config -----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 os_env = os.getenv
-STORAGE_ACCOUNT = os.environ["STORAGE_ACCOUNT_NAME"]
-CONTENT_CONT = os_env("CONTAINER_NAME", "content")
-LOGS_CONT = os_env("LOG_CONTAINER_NAME", "logs")
-ALLOW_DOMAINS = {d.strip().lower() for d in os_env("ALLOW_DOMAINS", "").split(";") if d.strip()}
-SKIP_PATTERNS = [re.compile(p) for p in os_env("SKIP_REGEXES", "").split(";") if p]
-MAX_DEPTH = int(os_env("MAX_DEPTH", "3"))
-REQUEST_DELAY = float(os_env("REQUEST_DELAY", "0.5"))
-PAGE_TIMEOUT_MS = int(os_env("PAGE_TIMEOUT_MS", "45000"))
-NETWORK_IDLE_WAIT_MS = int(os_env("NETWORK_IDLE_WAIT_MS", "0"))
-MAX_CONTENT_CHARS = int(os_env("MAX_CONTENT_CHARS", "500000"))
-INCLUDE_PDFS = os_env("INCLUDE_PDFS", "true").lower() == "true"
-PDF_DOWNLOAD_TIMEOUT_MS = int(os_env("PDF_DOWNLOAD_TIMEOUT_MS", "60000"))
-PDF_CHUNK_CHARS = int(os_env("PDF_CHUNK_CHARS", "4000"))
-PDF_CHUNK_OVERLAP = int(os_env("PDF_CHUNK_OVERLAP", "300"))
-MAX_PDF_BYTES = int(os_env("MAX_PDF_BYTES", "20000000"))
-RESPECT_ROBOTS = os_env("RESPECT_ROBOTS", "true").lower() == "true"
-SAVE_404 = os_env("SAVE_404", "false").lower() == "true"
-USER_AGENT = os_env("USER_AGENT", "Mozilla/5.0 (GenericCrawler/1.0)")
-INSIGHTS_KEY = os_env("APPINSIGHTS_INSTRUMENTATIONKEY", "")
-RETRY_COUNT = int(os_env("RETRY_COUNT", "3"))
-RETRY_BACKOFF = float(os_env("RETRY_BACKOFF_FACTOR", "2"))
+STORAGE_ACCOUNT = os.environ["CRAWL_STORAGE_ACCOUNT_NAME"]
+STORAGE_CONNECTION_STRING = os_env("CRAWL_STORAGE_CONNECTION_STRING")
+USER_ASSIGNED_CLIENT_ID = os_env("CRAWL_STORAGE_CLIENT_ID")
+STORAGE_CONNECTION_METHOD = os_env("CRAWL_STORAGE_CREDENTIAL", "managedidentity")
+CONTENT_CONT = os_env("CRAWL_CONTAINER_NAME", "content")
+LOGS_CONT = os_env("CRAWL_LOG_CONTAINER_NAME", "logs")
+ALLOW_DOMAINS = {d.strip().lower() for d in os_env("CRAWL_ALLOW_DOMAINS", "").split(";") if d.strip()}
+SKIP_PATTERNS = [re.compile(p) for p in os_env("CRAWL_SKIP_REGEXES", "").split(";") if p]
+MAX_DEPTH = int(os_env("CRAWL_MAX_DEPTH", "3"))
+REQUEST_DELAY = float(os_env("CRAWL_REQUEST_DELAY", "0.5"))
+PAGE_TIMEOUT_MS = int(os_env("CRAWL_PAGE_TIMEOUT_MS", "45000"))
+NETWORK_IDLE_WAIT_MS = int(os_env("CRAWL_NETWORK_IDLE_WAIT_MS", "0"))
+MAX_CONTENT_CHARS = int(os_env("CRAWL_MAX_CONTENT_CHARS", "500000"))
+INCLUDE_PDFS = os_env("CRAWL_INCLUDE_PDFS", "true").lower() == "true"
+PDF_DOWNLOAD_TIMEOUT_MS = int(os_env("CRAWL_PDF_DOWNLOAD_TIMEOUT_MS", "60000"))
+PDF_CHUNK_CHARS = int(os_env("CRAWL_PDF_CHUNK_CHARS", "4000"))
+PDF_CHUNK_OVERLAP = int(os_env("CRAWL_PDF_CHUNK_OVERLAP", "300"))
+MAX_PDF_BYTES = int(os_env("CRAWL_MAX_PDF_BYTES", "20000000"))
+RESPECT_ROBOTS = os_env("CRAWL_RESPECT_ROBOTS", "true").lower() == "true"
+SAVE_404 = os_env("CRAWL_SAVE_404", "false").lower() == "true"
+USER_AGENT = os_env("CRAWL_USER_AGENT", "Mozilla/5.0 (GenericCrawler/1.0)")
+INSIGHTS_KEY = os_env("CRAWL_APPINSIGHTS_INSTRUMENTATIONKEY", "")
+RETRY_COUNT = int(os_env("CRAWL_RETRY_COUNT", "3"))
+RETRY_BACKOFF = float(os_env("CRAWL_RETRY_BACKOFF_FACTOR", "2"))
 
-cred = DefaultAzureCredential()
-blob_service = BlobServiceClient(
-    account_url=f"https://{STORAGE_ACCOUNT}.blob.core.windows.net",
-    credential=cred
-)
+# ----------- BlobServiceClient Auth Logic -----------
+if STORAGE_CONNECTION_METHOD == "connectionstring":
+    blob_service = BlobServiceClient.from_connection_string(STORAGE_CONNECTION_STRING)
+else:
+    if USER_ASSIGNED_CLIENT_ID:
+        cred = ManagedIdentityCredential(client_id=USER_ASSIGNED_CLIENT_ID)
+    else:
+        cred = DefaultAzureCredential()
+    blob_service = BlobServiceClient(
+        account_url=f"https://{STORAGE_ACCOUNT}.blob.core.windows.net",
+        credential=cred
+    )
+
 content_container = blob_service.get_container_client(CONTENT_CONT)
 logs_container = blob_service.get_container_client(LOGS_CONT)
 tc = TelemetryClient(INSIGHTS_KEY) if INSIGHTS_KEY else None
