@@ -26,6 +26,7 @@ import pandas as pd
 # ----------- Logging and Env Config -----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 os_env = os.getenv
+BASE_URLS=os_env("CRAWL_BASE_URLS", "")
 STORAGE_ACCOUNT = os.environ["CRAWL_STORAGE_ACCOUNT_NAME"]
 STORAGE_CONNECTION_STRING = os_env("CRAWL_STORAGE_CONNECTION_STRING")
 USER_ASSIGNED_CLIENT_ID = os_env("CRAWL_STORAGE_CLIENT_ID")
@@ -534,7 +535,7 @@ def bfs_crawl(seed_urls):
 
 def start_crawl():
     try:
-        seeds = [u.strip() for u in os_env("BASE_URLS", "").split(";") if u.strip()]
+        seeds = [u.strip() for u in BASE_URLS.split(";") if u.strip()]
         for s in seeds:
             ALLOW_DOMAINS.add(urlparse(s).netloc.lower().replace("www.", ""))
         urls = []
