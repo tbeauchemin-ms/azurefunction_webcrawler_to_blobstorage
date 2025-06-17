@@ -24,39 +24,42 @@ from dateutil import parser as date_parser, tz
 from applicationinsights import TelemetryClient
 from docx import Document as DocxDocument
 import pandas as pd
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ----------- Logging and Env Config -----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 os_env = os.getenv
 
 STORAGE_ACCOUNT = os.environ["STORAGE_ACCOUNT_NAME"]
-CONTENT_CONT   = os_env("CONTAINER_NAME", "content")
-LOGS_CONT      = os_env("LOG_CONTAINER_NAME", "logs")
+CONTENT_CONT = os_env("CONTAINER_NAME", "content")
+LOGS_CONT = os_env("LOG_CONTAINER_NAME", "logs")
 
-ALLOW_DOMAINS   = {d.strip().lower() for d in os_env("ALLOW_DOMAINS", "").split(";") if d.strip()}
-SKIP_PATTERNS   = [re.compile(p) for p in os_env("SKIP_REGEXES", "").split(";") if p]
+ALLOW_DOMAINS = {d.strip().lower() for d in os_env("ALLOW_DOMAINS", "").split(";") if d.strip()}
+SKIP_PATTERNS = [re.compile(p) for p in os_env("SKIP_REGEXES", "").split(";") if p]
 
-MAX_DEPTH            = int(os_env("MAX_DEPTH", "3"))
-REQUEST_DELAY        = float(os_env("REQUEST_DELAY", "0.5"))
-PAGE_TIMEOUT_MS      = int(os_env("PAGE_TIMEOUT_MS", "45000"))
+MAX_DEPTH = int(os_env("MAX_DEPTH", "3"))
+REQUEST_DELAY = float(os_env("REQUEST_DELAY", "0.5"))
+PAGE_TIMEOUT_MS = int(os_env("PAGE_TIMEOUT_MS", "45000"))
 NETWORK_IDLE_WAIT_MS = int(os_env("NETWORK_IDLE_WAIT_MS", "0"))
+MAX_CONTENT_CHARS = int(os_env("MAX_CONTENT_CHARS", "50000"))
 
-# Reduce MAX_CONTENT_CHARS from 500000 to 50000
-MAX_CONTENT_CHARS    = int(os_env("MAX_CONTENT_CHARS", "50000"))
+INCLUDE_PDFS = os_env("INCLUDE_PDFS", "true").lower() == "true"
+INCLUDE_DOCX = os_env("INCLUDE_DOCX", "true").lower() == "true"
+INCLUDE_XLSX = os_env("INCLUDE_XLSX", "true").lower() == "true"
 
-INCLUDE_PDFS          = os_env("INCLUDE_PDFS", "true").lower() == "true"
 PDF_DOWNLOAD_TIMEOUT_MS = int(os_env("PDF_DOWNLOAD_TIMEOUT_MS", "60000"))
-CHUNK_CHARS         = int(os_env("CHUNK_CHARS", "4000"))
-CHUNK_OVERLAP       = int(os_env("CHUNK_OVERLAP", "300"))
-MAX_PDF_BYTES           = int(os_env("MAX_PDF_BYTES", "20000000"))
+CHUNK_CHARS = int(os_env("CHUNK_CHARS", "4000"))
+CHUNK_OVERLAP = int(os_env("CHUNK_OVERLAP", "300"))
+MAX_PDF_BYTES = int(os_env("MAX_PDF_BYTES", "20000000"))
 
 RESPECT_ROBOTS = os_env("RESPECT_ROBOTS", "true").lower() == "true"
-SAVE_404       = os_env("SAVE_404", "false").lower() == "true"
-USER_AGENT     = os_env("USER_AGENT", "Mozilla/5.0 (GenericCrawler/1.0)")
+USER_AGENT = os_env("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-INSIGHTS_KEY   = os_env("APPINSIGHTS_INSTRUMENTATIONKEY", "")
-RETRY_COUNT    = int(os_env("RETRY_COUNT", "3"))
-RETRY_BACKOFF  = float(os_env("RETRY_BACKOFF_FACTOR", "2"))
+INSIGHTS_KEY = os_env("APPINSIGHTS_INSTRUMENTATIONKEY", "")
+RETRY_COUNT = int(os_env("RETRY_COUNT", "3"))
+RETRY_BACKOFF = float(os_env("RETRY_BACKOFF_FACTOR", "2"))
+SAVE_404 = os_env("SAVE_404", "false").lower() == "true"
 
 cred = DefaultAzureCredential()
 blob_service = BlobServiceClient(
@@ -64,17 +67,16 @@ blob_service = BlobServiceClient(
     credential=cred
 )
 content_container = blob_service.get_container_client(CONTENT_CONT)
-logs_container    = blob_service.get_container_client(LOGS_CONT)
+logs_container = blob_service.get_container_client(LOGS_CONT)
 
 tc = TelemetryClient(INSIGHTS_KEY) if INSIGHTS_KEY else None
 
-visited     = set()
-documents   = []
+visited = set()
+documents = []
 sitemap_urls = []
-failed      = []
+failed = []
 robots_cache = {}
 collection_lock = Lock()
-
 
 # Dedup cache: (url, chunk_index)
 seen = set()
@@ -85,7 +87,38 @@ try:
 except FileNotFoundError:
     pass
 
+session = requests.Session()
+session.headers.update({
+    "User-Agent": USER_AGENT,
+    "Accept": "application/pdf,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Referer": "https://www.google.com",
+})
+session.mount('https://', HTTPAdapter(max_retries=Retry(
+    total=RETRY_COUNT, backoff_factor=RETRY_BACKOFF,
+    status_forcelist=[403, 429, 500, 502, 503, 504]))
+)
+
 # ----------- Utility Functions -----------
+
+def get_domain_session(base_url: str) -> requests.Session:
+    """
+    Return a copy of the global session, with its headers cloned,
+    ready for per‐domain customization.
+    """
+    dom_sess = requests.Session()
+    # copy adapters from the global session (so you keep your retry logic)
+    for prefix, adapter in session.adapters.items():
+        dom_sess.mount(prefix, adapter)
+
+    # copy over any default headers you want
+    dom_sess.headers.update(session.headers)
+
+    # now you can update per-domain headers as needed
+    return dom_sess
+
 
 def sanitize(text):
     return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").lower()
@@ -384,114 +417,112 @@ def handle_xlsx(url: str):
             failed.append({"url": url, "reason": f"XLSX parse error: {e}"})
 
 def handle_pdf(playwright_ctx, url: str):
-    """
-    Hybrid PDF handling:
-    1) HEAD to check size
-    2) requests.get(...) for most PDFs
-    3) Playwright fallback if needed
-    """
     norm_url = normalize_url(url)
     logging.info("Visiting PDF: %s", norm_url)
 
-    # 1) HEAD request to check size
+    # Dynamically generate headers
+    parsed   = urlparse(url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+    referer  = f"{base_url}/"
+
+    pdf_sess = get_domain_session(base_url)
+    pdf_sess.headers.update({
+        "User-Agent": USER_AGENT,
+        "Accept": "application/pdf,*/*;q=0.9",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Referer": referer,
+        "Origin": base_url
+    })
+
+    retries = Retry(
+        total=RETRY_COUNT,
+        backoff_factor=RETRY_BACKOFF,
+        status_forcelist=[403, 429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET"]
+    )
+
+    pdf_sess.mount("https://", HTTPAdapter(max_retries=retries))
+    pdf_sess.mount("http://", HTTPAdapter(max_retries=retries))
+
     try:
-        head = requests.head(url, headers={"User-Agent": USER_AGENT}, allow_redirects=True, timeout=10)
-        if head.status_code != 200:
-            if head.status_code >= 400:
-                with collection_lock:
-                    failed.append({"url": url, "reason": f"PDF HTTP {head.status_code}"})
-                return []
-        size = int(head.headers.get("Content-Length", "0"))
-        if size > MAX_PDF_BYTES:
-            logging.warning("Skipping large PDF: %s (%d bytes)", norm_url, size)
-            return []
-    except Exception:
-        # HEAD failed (403/timeout), proceed to GET
-        pass
+        # Initial visit to base domain to establish cookies if necessary
+        pdf_sess.get(base_url, timeout=10).raise_for_status()
 
-    # 2) Direct GET via requests
-    try:
-        r = requests.get(url,
-                         headers={"User-Agent": USER_AGENT},
-                         timeout=(10, PDF_DOWNLOAD_TIMEOUT_MS / 1000))
-        if r.status_code == 200 and "pdf" in r.headers.get("Content-Type","").lower():
-            # extract all text
-            reader = PdfReader(BytesIO(r.content))
-            raw = "".join(pg.extract_text() or "" for pg in reader.pages)
-
-            # determine last_modified
-            lm = r.headers.get("Last-Modified")
-            if lm:
-                dt = date_parser.parse(lm)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=tz.UTC)
-                last_mod = dt.astimezone(tz.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-            else:
-                last_mod = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-            if tc:
-                tc.track_metric("PDFChunks", (len(raw) // CHUNK_CHARS) + 1)
-
-            # now chunk & upload **exactly** like other handlers
-            emit_chunks(norm_url, raw, last_mod)
-            return []
-        # If not a PDF content-type or status != 200, fall through to Playwright
-    except Exception as e:
-        logging.warning(f"Requests GET for PDF failed, falling back to Playwright: {e}")
-
-    # 3) Playwright fallback
-    try:
-        resp = None
-        for attempt in range(RETRY_COUNT):
-            try:
-                page = playwright_ctx.new_page()
-                resp = page.goto(url, timeout=PDF_DOWNLOAD_TIMEOUT_MS, wait_until="networkidle")
-                break
-            except PlaywrightTimeoutError:
-                logging.warning("PDF fetch attempt %d failed in Playwright, retrying...", attempt + 1)
-                time.sleep(REQUEST_DELAY * (RETRY_BACKOFF ** attempt))
-            except Exception as e:
-                logging.warning("PDF fetch attempt %d failed in Playwright: %s", attempt + 1, e)
-                time.sleep(REQUEST_DELAY * (RETRY_BACKOFF ** attempt))
-
-        if not resp:
-            with collection_lock:
-                failed.append({"url": url, "reason": "PDF HTTP no response (Playwright)"})
-            return []
-
-        if resp.status >= 400:
-            with collection_lock:
-                failed.append({"url": url, "reason": f"PDF HTTP {resp.status} (Playwright)"})
-            page.close()
-            return []
-
-        buffer = page.content()
-        reader = PdfReader(BytesIO(buffer))
-        raw = "".join(pg.extract_text() or "" for pg in reader.pages)
-
-        lm = resp.headers.get("Last-Modified")
-        if lm:
-            dt = date_parser.parse(lm)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=tz.UTC)
-            last_mod = dt.astimezone(tz.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Check PDF size with HEAD request
+        h = pdf_sess.head(url, allow_redirects=True, timeout=10)
+        if h.status_code == 200:
+            size = int(h.headers.get("Content-Length", 0))
+            if size > MAX_PDF_BYTES:
+                logging.warning("Skipping large PDF: %s (%d bytes)", norm_url, size)
+                return
         else:
-            last_mod = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            logging.warning("HEAD request returned %d for %s; proceeding to GET", h.status_code, url)
 
-        if tc:
-            tc.track_metric("PDFChunks", (len(raw) // CHUNK_CHARS) + 1)
+    except Exception as e:
+        logging.warning("HEAD error for PDF %s: %s; proceeding to GET", url, e)
 
-        # same unified chunk emitter
-        emit_chunks(norm_url, raw, last_mod)
+    success = False
+    for attempt in range(RETRY_COUNT):
+        try:
+            r = pdf_sess.get(url, allow_redirects=True, timeout=(10, PDF_DOWNLOAD_TIMEOUT_MS / 1000))
+            if r.status_code == 200 and "pdf" in r.headers.get("Content-Type", "").lower():
+                success = True
+                break
+            else:
+                with collection_lock:
+                    failed.append({"url": url, "reason": f"PDF HTTP {r.status_code} (GET)"})
+        except Exception as e:
+            with collection_lock:
+                failed.append({"url": url, "reason": f"PDF GET error: {e}"})
+        time.sleep(REQUEST_DELAY * (RETRY_BACKOFF ** attempt))
+
+    if success:
+        with collection_lock:
+            failed[:] = [f for f in failed if not (f["url"] == url and "(GET)" in f["reason"])]
+        reader = PdfReader(BytesIO(r.content))
+        raw = "".join(p.extract_text() or "" for p in reader.pages)
+        lm = r.headers.get("Last-Modified", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        emit_chunks(norm_url, raw, lm)
+        return
+
+    logging.warning("All GET attempts failed; falling back to Playwright download")
+
+    # Fallback Playwright
+    # ─── Fallback: use Playwright’s browser download ────────────────────────────
+    try:
+        # 1) Open a real browser page and establish cookies/JS context
+        page = playwright_ctx.new_page()
+        page.goto(base_url, timeout=30000, wait_until="networkidle")
+
+        # 2) Trigger the PDF download
+        with page.expect_download() as dl:
+            page.goto(url, timeout=60000)
+        download = dl.value
+
+        # 3) Read the downloaded bytes
+        buffer = download.content()
+        reader = PdfReader(BytesIO(buffer))
+        raw = "".join(p.extract_text() or "" for p in reader.pages)
+
+        # 4) Emit chunks just like in the GET path
+        lm = download.suggested_filename  # or grab headers from download if available
+        emit_chunks(norm_url, raw, lm)
 
         page.close()
-        return []
+        return
 
     except Exception as e:
-        logging.warning(f"Error handling PDF {url} in Playwright fallback: {e}")
+        logging.warning("Playwright browser download for %s failed: %s", url, e)
         with collection_lock:
-            failed.append({"url": url, "reason": f"PDF parse error: {e}"})
-        return []
+            failed.append({"url": url, "reason": f"Playwright download error: {e}"})
+        try:
+            page.close()
+        except:
+            pass
+        return
+
 
 def handle_page(playwright_ctx, url: str):
     """
@@ -727,11 +758,11 @@ def bfs_crawl(seed_urls):
                 continue
 
             # Dispatch based on file extension
-            if norm_url.endswith(".pdf"):
+            if norm_url.endswith(".pdf") and INCLUDE_PDFS:
                 handle_pdf(ctx, url)
-            elif norm_url.endswith(".docx"):
+            elif norm_url.endswith(".docx") and INCLUDE_DOCX:
                 handle_docx(url)
-            elif norm_url.endswith(".xlsx"):
+            elif norm_url.endswith(".xlsx") and INCLUDE_XLSX:
                 handle_xlsx(url)
             elif norm_url.endswith(".doc") or norm_url.endswith(".xls"):
                 logging.debug(f"Skipping unsupported Office format: {norm_url}")
@@ -755,6 +786,8 @@ def bfs_crawl(seed_urls):
 def start_crawl():
     try:
         seeds = [u.strip() for u in os_env("BASE_URLS", "").split(";") if u.strip()]
+        
+        # Dynamically add domains from seeds to ALLOW_DOMAINS
         for s in seeds:
             ALLOW_DOMAINS.add(urlparse(s).netloc.lower().replace("www.", ""))
 
@@ -765,27 +798,34 @@ def start_crawl():
             if entries:
                 logging.info("✅ Using sitemap for %s (%d URLs)", seed, len(entries))
                 for u in entries:
-                    n = normalize_url(u)
-                    if n not in visited:
+                    norm_u = normalize_url(u)
+                    if norm_u not in visited:
                         urls.append(u)
             else:
-                logging.info("⚠️  No sitemap for %s; falling back to seed", seed)
+                logging.info("⚠️ No sitemap for %s; falling back to seed URL", seed)
                 urls.append(seed)
 
-        logging.info("🚀 Starting BFS crawl with %d starting URLs", len(urls))
+        logging.info("🚀 Starting BFS crawl with %d URLs", len(urls))
         bfs_crawl(urls)
 
     except Exception as e:
         logging.error(f"Crawl failed: {e}", exc_info=True)
 
     finally:
+        # Save any failures and sitemap URLs to blob storage
         if failed:
-            upload_json(failed, "failed_url.json", logs_container)
+            upload_json(failed, "failed_urls.json", logs_container)
         if sitemap_urls:
             upload_json(sitemap_urls, "sitemap.json", logs_container)
         if documents:
             upload_json(documents, "docs.json", logs_container)
-        logging.info(f"Crawl complete, output files written. Visited={len(visited)} Failed={len(failed)}")
+
+        logging.info(
+            "Crawl complete. Total URLs Visited: %d, Failed: %d",
+            len(visited),
+            len(failed)
+        )
 
 if __name__ == "__main__":
     start_crawl()
+
