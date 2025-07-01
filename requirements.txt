@@ -18,3 +18,5 @@ pandas
 xlrd
 readability-lxml
 lxml
+openai
+tiktoken
