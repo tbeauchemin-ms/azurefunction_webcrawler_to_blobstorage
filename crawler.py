@@ -667,13 +667,14 @@ def crawl_worker(task):
         }
         ctx = browser.new_context(**context_opts)
         try:
-            if norm_url.endswith(".pdf") and INCLUDE_PDFS:
+            lower_url = norm_url.lower()
+            if lower_url.endswith(".pdf") and INCLUDE_PDFS:
                 handle_pdf(ctx, url)
-            elif norm_url.endswith(".docx") and INCLUDE_DOCX:
+            elif lower_url.endswith(".docx") and INCLUDE_DOCX:
                 handle_docx(url)
-            elif norm_url.endswith(".xlsx") and INCLUDE_XLSX:
+            elif lower_url.endswith(".xlsx") and INCLUDE_XLSX:
                 handle_xlsx(url)
-            elif norm_url.endswith(".doc") or norm_url.endswith(".xls"):
+            elif lower_url.endswith(".doc") or lower_url.endswith(".xls"):
                 log(f"Skipping unsupported Office format: {norm_url}")
             else:
                 results = handle_page(ctx, url)
@@ -682,6 +683,7 @@ def crawl_worker(task):
         finally:
             browser.close()
     return results
+
 
 def bfs_crawl_parallel(seed_urls):
     global visited
