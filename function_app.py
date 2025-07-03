@@ -8,11 +8,6 @@ import azure.functions as func
 
 from crawler import start_crawl, visited, failed
 
-# Application Insights (if you still want to track from here)
-from applicationinsights import TelemetryClient
-INSIGHTS_KEY = os.getenv("APPINSIGHTS_INSTRUMENTATIONKEY", "")
-tc = TelemetryClient(INSIGHTS_KEY) if INSIGHTS_KEY else None
-
 app = func.FunctionApp()
 
 # ── Timer trigger for daily crawl ────────────────────────────────────────────
@@ -25,15 +20,8 @@ app = func.FunctionApp()
 @app.function_name(name="WebCrawlTimerFunction")
 def web_crawl_timer(mytimer: func.TimerRequest) -> None:
     logging.info("🔄 Timer trigger fired; starting crawl")
-    if tc:
-        tc.track_event("CrawlTriggered")
     start_crawl()  # your existing function
     logging.info("✅ Crawl finished; visited=%d failed=%d", len(visited), len(failed))
-    if tc:
-        tc.track_metric("PagesVisited", len(visited))
-        tc.track_metric("PagesFailed", len(failed))
-        tc.track_event("CrawlCompleted")
-        tc.flush()
 
 # ── HTTP trigger for health check ────────────────────────────────────────────
 @app.route(route="ping", auth_level=func.AuthLevel.ANONYMOUS)
@@ -50,4 +38,3 @@ def ping(req: func.HttpRequest) -> func.HttpResponse:
         status_code=200,
         mimetype="application/json"
     )
-
