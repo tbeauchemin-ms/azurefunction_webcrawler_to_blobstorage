@@ -18,7 +18,6 @@ from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from PyPDF2 import PdfReader
-from applicationinsights import TelemetryClient
 from docx import Document as DocxDocument
 import pandas as pd
 from requests.adapters import HTTPAdapter
@@ -26,6 +25,7 @@ from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import openai
 import tiktoken
+
 
 # ---- LOGGING ----
 def log(msg):
@@ -55,7 +55,6 @@ TOKEN_OVERLAP = int(os_env("TOKEN_OVERLAP", "300"))
 MAX_PDF_BYTES = int(os_env("MAX_PDF_BYTES", "20000000"))
 RESPECT_ROBOTS = os_env("RESPECT_ROBOTS", "true").lower() == "true"
 USER_AGENT = os_env("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-INSIGHTS_KEY = os_env("APPINSIGHTS_INSTRUMENTATIONKEY", "")
 RETRY_COUNT = int(os_env("RETRY_COUNT", "3"))
 RETRY_BACKOFF = float(os_env("RETRY_BACKOFF_FACTOR", "2"))
 SAVE_404 = os_env("SAVE_404", "false").lower() == "true"
@@ -63,8 +62,9 @@ SAVE_404 = os_env("SAVE_404", "false").lower() == "true"
 api_key = os.environ["AZURE_OPENAI_API_KEY"]
 endpoint = os.environ["AZURE_OPENAI_ENDPOINT"]
 api_version = os_env("AZURE_OPENAI_API_VERSION", "2023-05-15")
-EMBEDDING_MODEL = os.environ.get("AZURE_OPENAI_EMBEDDING_MODEL", "text-embedding-ada-002")
-EMBEDDING_TOKEN_LIMIT = int(os_env("EMBEDDING_TOKEN_LIMIT", "8192")) # Default to 8192 for ada-002
+EMBEDDING_DEPLOYMENT_NAME = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME", "myproject-text-embedding-ada-002") # This is the CUSTOM name YOU give the model (often the same as the actual).
+EMBEDDING_MODEL_NAME = os.environ.get("AZURE_OPENAI_EMBEDDING_MODEL_NAME", "text-embedding-ada-002") # This is the actual model name. 
+EMBEDDING_TOKEN_LIMIT = int(os_env("EMBEDDING_TOKEN_LIMIT", "8191")) # Default to 8191 for ada-002 and 3-small
 
 cred = DefaultAzureCredential()
 blob_service = BlobServiceClient(
@@ -74,7 +74,6 @@ blob_service = BlobServiceClient(
 content_container = blob_service.get_container_client(CONTENT_CONT)
 logs_container = blob_service.get_container_client(LOGS_CONT)
 
-tc = TelemetryClient(INSIGHTS_KEY) if INSIGHTS_KEY else None
 
 visited = set()
 documents = []
@@ -108,7 +107,7 @@ session.mount('https://', HTTPAdapter(max_retries=Retry(
 
 # ---- CORE UTILS, LOGGING EVERYWHERE ----
 def get_embedding_aoai(text, client=None):
-    enc = tiktoken.encoding_for_model(EMBEDDING_MODEL)
+    enc = tiktoken.encoding_for_model(EMBEDDING_MODEL_NAME)
     num_tokens = len(enc.encode(text))
     if num_tokens > EMBEDDING_TOKEN_LIMIT:
         log(f"Skipping embedding for chunk (tokens={num_tokens} > {EMBEDDING_TOKEN_LIMIT})")
@@ -126,9 +125,9 @@ def get_embedding_aoai(text, client=None):
     try:
         response = client.embeddings.create(
             input=[text],
-            model=EMBEDDING_MODEL
+            model=EMBEDDING_DEPLOYMENT_NAME
         )
-        log(f"Embedding generated for chunk ({len(text)} chars) using model {EMBEDDING_MODEL} (api_version={api_version})")
+        log(f"Embedding generated for chunk ({len(text)} chars) using model {EMBEDDING_DEPLOYMENT_NAME} (api_version={api_version})")
         return response.data[0].embedding
     except Exception as e:
         log(f"Embedding generation failed: {e}")
@@ -213,13 +212,11 @@ def upload_json(data, blob_name, container, last_modified=None):
             metadata=meta
         )
         log(f"Uploaded blob: {blob_name}")
-        if tc:
-            tc.track_event("Upload", {"blob": blob_name})
+
         return True
     except Exception as e:
         log(f"Upload failed: {blob_name} - {e}")
-        if tc:
-            tc.track_exception()
+
         return False
     
 
@@ -336,7 +333,7 @@ def extract_real_link(base_url, href):
     return normalize_url(abs_url)
 
 def split_by_tokens(text, max_tokens=EMBEDDING_TOKEN_LIMIT-100, overlap=TOKEN_OVERLAP):
-    enc = tiktoken.encoding_for_model(EMBEDDING_MODEL)
+    enc = tiktoken.encoding_for_model(EMBEDDING_MODEL_NAME)
     tokens = enc.encode(text)
     chunks = []
     i = 0
