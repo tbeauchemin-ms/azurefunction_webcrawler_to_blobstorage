@@ -10,7 +10,6 @@ requests
 beautifulsoup4
 PyPDF2
 python-dateutil
-applicationinsights
 psutil
 python-docx
 openpyxl
@@ -18,3 +17,5 @@ pandas
 xlrd
 readability-lxml
 lxml
+openai
+tiktoken
