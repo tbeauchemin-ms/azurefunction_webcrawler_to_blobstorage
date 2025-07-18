@@ -50,7 +50,7 @@ REQUEST_DELAY = float(os_env("REQUEST_DELAY", "0.5"))
 PAGE_TIMEOUT_MS = int(os_env("PAGE_TIMEOUT_MS", "45000"))
 NETWORK_IDLE_WAIT_MS = int(os_env("NETWORK_IDLE_WAIT_MS", "0"))
 RETRY_COUNT = int(os_env("RETRY_COUNT", "3"))
-RETRY_BACKOFF = float(os_env("RETRY_BACKOFF_FACTOR", "2"))
+RETRY_BACKOFF = int(os_env("RETRY_BACKOFF_FACTOR", "2"))
 
 # ---- CONTENT PROCESSING CONFIGURATION ----
 MAX_CONTENT_CHARS = int(os_env("MAX_CONTENT_CHARS", "500000"))
@@ -533,6 +533,7 @@ def handle_pdf(playwright_ctx, url: str):
     except Exception as e:
         log(f"HEAD error for PDF {url}: {e}; proceeding to GET")
     success = False
+    r = None  # Initialize r to avoid unbound variable error
     for attempt in range(RETRY_COUNT):
         try:
             r = pdf_sess.get(url, allow_redirects=True, timeout=(10, PDF_DOWNLOAD_TIMEOUT_MS / 1000))
@@ -546,7 +547,7 @@ def handle_pdf(playwright_ctx, url: str):
             with collection_lock:
                 failed.append({"url": url, "reason": f"PDF GET error: {e}"})
         time.sleep(REQUEST_DELAY * (RETRY_BACKOFF ** attempt))
-    if success:
+    if success and r is not None:
         with collection_lock:
             failed[:] = [f for f in failed if not (f["url"] == url and "(GET)" in f["reason"])]
         reader = PdfReader(BytesIO(r.content))
@@ -555,6 +556,7 @@ def handle_pdf(playwright_ctx, url: str):
         emit_chunks(norm_url, raw, lm)
         return
     log(f"All GET attempts failed; falling back to Playwright download")
+    page = None  # Initialize page to avoid unbound variable error
     try:
         page = playwright_ctx.new_page()
         page.goto(base_url, timeout=PDF_DOWNLOAD_TIMEOUT_MS, wait_until="networkidle")
@@ -566,16 +568,18 @@ def handle_pdf(playwright_ctx, url: str):
         raw = "".join(p.extract_text() or "" for p in reader.pages)
         lm = download.suggested_filename
         emit_chunks(norm_url, raw, lm)
-        page.close()
+        if page:
+            page.close()
         return
     except Exception as e:
         log(f"Playwright browser download for {url} failed: {e}")
         with collection_lock:
             failed.append({"url": url, "reason": f"Playwright download error: {e}"})
-        try:
-            page.close()
-        except:
-            pass
+        if page:
+            try:
+                page.close()
+            except:
+                pass
         return
 
 def handle_page(playwright_ctx, url: str):
@@ -629,7 +633,16 @@ def handle_page(playwright_ctx, url: str):
             with collection_lock:
                 failed.append({"url": url, "reason": "All fetch attempts failed or invalid HTML"})
             return []
-        soup_links = [a.get("href") for a in soup.find_all("a", href=True)]
+        # Safely extract href attributes from anchor tags
+        soup_links = []
+        for a in soup.find_all("a", href=True):
+            try:
+                # Use getattr with default to safely access href
+                href = getattr(a, 'get', lambda x, default=None: default)('href')
+                if href:
+                    soup_links.append(href)
+            except (AttributeError, TypeError):
+                continue
         all_raw_links = set(raw_links) | set(soup_links)
         log(f"Extracted {len(all_raw_links)} total <a> links from {url}")
         absolute_links = []
