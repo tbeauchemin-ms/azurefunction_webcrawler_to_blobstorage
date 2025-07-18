@@ -34,31 +34,43 @@ def log(msg):
 
 # ---- ENV/CONFIG ----
 os_env = os.getenv
+
+# ---- CRAWL CONFIGURATION ----
 BASE_URLS = os_env("BASE_URLS", "")
+ALLOW_DOMAINS = {d.strip().lower() for d in os_env("ALLOW_DOMAINS", "").split(";") if d.strip()}
+SKIP_PATTERNS = [re.compile(p) for p in os_env("SKIP_REGEXES", "").split(";") if p]
+MAX_DEPTH = int(os_env("MAX_DEPTH", "3"))
+MAX_WORKERS = int(os_env("MAX_WORKERS", "4"))
+USER_AGENT = os_env("USER_AGENT", "Mozilla/5.0 (GenericCrawler/1.0)")
+RESPECT_ROBOTS = os_env("RESPECT_ROBOTS", "true").lower() == "true"
+SAVE_404 = os_env("SAVE_404", "false").lower() == "true"
+
+# ---- NETWORK & TIMING CONFIGURATION ----
+REQUEST_DELAY = float(os_env("REQUEST_DELAY", "0.5"))
+PAGE_TIMEOUT_MS = int(os_env("PAGE_TIMEOUT_MS", "45000"))
+NETWORK_IDLE_WAIT_MS = int(os_env("NETWORK_IDLE_WAIT_MS", "0"))
+RETRY_COUNT = int(os_env("RETRY_COUNT", "3"))
+RETRY_BACKOFF = float(os_env("RETRY_BACKOFF_FACTOR", "2"))
+
+# ---- CONTENT PROCESSING CONFIGURATION ----
+MAX_CONTENT_CHARS = int(os_env("MAX_CONTENT_CHARS", "500000"))
+INCLUDE_PDFS = os_env("INCLUDE_PDFS", "true").lower() == "true"
+INCLUDE_DOCX = os_env("INCLUDE_DOCX", "true").lower() == "true"
+INCLUDE_XLSX = os_env("INCLUDE_XLSX", "true").lower() == "true"
+PDF_DOWNLOAD_TIMEOUT_MS = int(os_env("PDF_DOWNLOAD_TIMEOUT_MS", "60000"))
+PDF_CHUNK_CHARS = int(os_env("PDF_CHUNK_CHARS", "4000"))
+PDF_CHUNK_OVERLAP = int(os_env("PDF_CHUNK_OVERLAP", "300"))
+MAX_PDF_BYTES = int(os_env("MAX_PDF_BYTES", "20000000"))
+
+# ---- AZURE STORAGE CONFIGURATION ----
 STORAGE_ACCOUNT = os.environ["STORAGE_ACCOUNT_NAME"]
 STORAGE_CONNECTION_STRING = os_env("STORAGE_CONNECTION_STRING")
 STORAGE_AUTH_METHOD = os_env("STORAGE_AUTH_METHOD", "managedidentity")
 STORAGE_CLIENT_ID = os_env("STORAGE_CLIENT_ID")
 CONTENT_CONT = os_env("CONTAINER_NAME", "content")
 LOGS_CONT = os_env("LOG_CONTAINER_NAME", "logs")
-ALLOW_DOMAINS = {d.strip().lower() for d in os_env("ALLOW_DOMAINS", "").split(";") if d.strip()}
-SKIP_PATTERNS = [re.compile(p) for p in os_env("SKIP_REGEXES", "").split(";") if p]
-MAX_DEPTH = int(os_env("MAX_DEPTH", "3"))
-REQUEST_DELAY = float(os_env("REQUEST_DELAY", "0.5"))
-PAGE_TIMEOUT_MS = int(os_env("PAGE_TIMEOUT_MS", "45000"))
-NETWORK_IDLE_WAIT_MS = int(os_env("NETWORK_IDLE_WAIT_MS", "0"))
-MAX_CONTENT_CHARS = int(os_env("MAX_CONTENT_CHARS", "500000"))
-INCLUDE_PDFS = os_env("INCLUDE_PDFS", "true").lower() == "true"
-PDF_DOWNLOAD_TIMEOUT_MS = int(os_env("PDF_DOWNLOAD_TIMEOUT_MS", "60000"))
-PDF_CHUNK_CHARS = int(os_env("PDF_CHUNK_CHARS", "4000"))
-PDF_CHUNK_OVERLAP = int(os_env("PDF_CHUNK_OVERLAP", "300"))
-MAX_PDF_BYTES = int(os_env("MAX_PDF_BYTES", "20000000"))
-RESPECT_ROBOTS = os_env("RESPECT_ROBOTS", "true").lower() == "true"
-SAVE_404 = os_env("SAVE_404", "false").lower() == "true"
-USER_AGENT = os_env("USER_AGENT", "Mozilla/5.0 (GenericCrawler/1.0)")
-INSIGHTS_KEY = os_env("APPINSIGHTS_INSTRUMENTATIONKEY", "")
-RETRY_COUNT = int(os_env("RETRY_COUNT", "3"))
-RETRY_BACKOFF = float(os_env("RETRY_BACKOFF_FACTOR", "2"))
+
+# ---- AZURE OPENAI CONFIGURATION ----
 OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
 OPENAI_API_KEY = os_env("AZURE_OPENAI_API_KEY")
 OPENAI_API_VERSION = os_env("AZURE_OPENAI_API_VERSION", "2023-05-15")
@@ -67,12 +79,10 @@ OPENAI_CLIENT_ID = os_env("AZURE_OPENAI_CLIENT_ID")
 EMBEDDING_DEPLOYMENT_NAME = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME", "myproject-text-embedding-ada-002") # This is the CUSTOM name YOU give the model (often the same as the actual).
 EMBEDDING_MODEL_NAME = os.environ.get("AZURE_OPENAI_EMBEDDING_MODEL_NAME", "text-embedding-ada-002") # This is the actual model name.
 EMBEDDING_TOKEN_LIMIT = int(os_env("EMBEDDING_TOKEN_LIMIT", "8191")) # Default to 8191 for ada-002 and 3-small
-
-# Additional missing constants
-INCLUDE_DOCX = os_env("INCLUDE_DOCX", "true").lower() == "true"
-INCLUDE_XLSX = os_env("INCLUDE_XLSX", "true").lower() == "true"
-MAX_WORKERS = int(os_env("MAX_WORKERS", "4"))
 TOKEN_OVERLAP = int(os_env("TOKEN_OVERLAP", "300"))
+
+# ---- MONITORING & LOGGING CONFIGURATION ----
+INSIGHTS_KEY = os_env("APPINSIGHTS_INSTRUMENTATIONKEY", "")
 
 # ----------- BlobServiceClient Auth Logic -----------
 def create_blob_service_client():
