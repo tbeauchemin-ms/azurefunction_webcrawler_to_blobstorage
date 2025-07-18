@@ -26,7 +26,6 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import openai
 import tiktoken
 
-
 # ---- LOGGING ----
 def log(msg):
     pid = os.getpid()
@@ -35,55 +34,118 @@ def log(msg):
 
 # ---- ENV/CONFIG ----
 os_env = os.getenv
-BASE_URLS=os_env("CRAWL_BASE_URLS", "")
-STORAGE_ACCOUNT = os.environ["CRAWL_STORAGE_ACCOUNT_NAME"]
-STORAGE_CONNECTION_STRING = os_env("CRAWL_STORAGE_CONNECTION_STRING")
-USER_ASSIGNED_CLIENT_ID = os_env("CRAWL_STORAGE_CLIENT_ID")
-STORAGE_CONNECTION_METHOD = os_env("CRAWL_STORAGE_CREDENTIAL", "managedidentity")
-CONTENT_CONT = os_env("CRAWL_CONTAINER_NAME", "content")
-LOGS_CONT = os_env("CRAWL_LOG_CONTAINER_NAME", "logs")
-ALLOW_DOMAINS = {d.strip().lower() for d in os_env("CRAWL_ALLOW_DOMAINS", "").split(";") if d.strip()}
-SKIP_PATTERNS = [re.compile(p) for p in os_env("CRAWL_SKIP_REGEXES", "").split(";") if p]
-MAX_DEPTH = int(os_env("CRAWL_MAX_DEPTH", "3"))
-REQUEST_DELAY = float(os_env("CRAWL_REQUEST_DELAY", "0.5"))
-PAGE_TIMEOUT_MS = int(os_env("CRAWL_PAGE_TIMEOUT_MS", "45000"))
-NETWORK_IDLE_WAIT_MS = int(os_env("CRAWL_NETWORK_IDLE_WAIT_MS", "0"))
-MAX_CONTENT_CHARS = int(os_env("CRAWL_MAX_CONTENT_CHARS", "500000"))
-INCLUDE_PDFS = os_env("CRAWL_INCLUDE_PDFS", "true").lower() == "true"
-PDF_DOWNLOAD_TIMEOUT_MS = int(os_env("CRAWL_PDF_DOWNLOAD_TIMEOUT_MS", "60000"))
-PDF_CHUNK_CHARS = int(os_env("CRAWL_PDF_CHUNK_CHARS", "4000"))
-PDF_CHUNK_OVERLAP = int(os_env("CRAWL_PDF_CHUNK_OVERLAP", "300"))
-MAX_PDF_BYTES = int(os_env("CRAWL_MAX_PDF_BYTES", "20000000"))
-RESPECT_ROBOTS = os_env("CRAWL_RESPECT_ROBOTS", "true").lower() == "true"
-SAVE_404 = os_env("CRAWL_SAVE_404", "false").lower() == "true"
-USER_AGENT = os_env("CRAWL_USER_AGENT", "Mozilla/5.0 (GenericCrawler/1.0)")
-INSIGHTS_KEY = os_env("CRAWL_APPINSIGHTS_INSTRUMENTATIONKEY", "")
-RETRY_COUNT = int(os_env("CRAWL_RETRY_COUNT", "3"))
-RETRY_BACKOFF = float(os_env("CRAWL_RETRY_BACKOFF_FACTOR", "2"))
-
-api_key = os.environ["AZURE_OPENAI_API_KEY"]
-endpoint = os.environ["AZURE_OPENAI_ENDPOINT"]
-api_version = os_env("AZURE_OPENAI_API_VERSION", "2023-05-15")
+BASE_URLS = os_env("BASE_URLS", "")
+STORAGE_ACCOUNT = os.environ["STORAGE_ACCOUNT_NAME"]
+STORAGE_CONNECTION_STRING = os_env("STORAGE_CONNECTION_STRING")
+STORAGE_AUTH_METHOD = os_env("STORAGE_AUTH_METHOD", "managedidentity")
+STORAGE_CLIENT_ID = os_env("STORAGE_CLIENT_ID")
+CONTENT_CONT = os_env("CONTAINER_NAME", "content")
+LOGS_CONT = os_env("LOG_CONTAINER_NAME", "logs")
+ALLOW_DOMAINS = {d.strip().lower() for d in os_env("ALLOW_DOMAINS", "").split(";") if d.strip()}
+SKIP_PATTERNS = [re.compile(p) for p in os_env("SKIP_REGEXES", "").split(";") if p]
+MAX_DEPTH = int(os_env("MAX_DEPTH", "3"))
+REQUEST_DELAY = float(os_env("REQUEST_DELAY", "0.5"))
+PAGE_TIMEOUT_MS = int(os_env("PAGE_TIMEOUT_MS", "45000"))
+NETWORK_IDLE_WAIT_MS = int(os_env("NETWORK_IDLE_WAIT_MS", "0"))
+MAX_CONTENT_CHARS = int(os_env("MAX_CONTENT_CHARS", "500000"))
+INCLUDE_PDFS = os_env("INCLUDE_PDFS", "true").lower() == "true"
+PDF_DOWNLOAD_TIMEOUT_MS = int(os_env("PDF_DOWNLOAD_TIMEOUT_MS", "60000"))
+PDF_CHUNK_CHARS = int(os_env("PDF_CHUNK_CHARS", "4000"))
+PDF_CHUNK_OVERLAP = int(os_env("PDF_CHUNK_OVERLAP", "300"))
+MAX_PDF_BYTES = int(os_env("MAX_PDF_BYTES", "20000000"))
+RESPECT_ROBOTS = os_env("RESPECT_ROBOTS", "true").lower() == "true"
+SAVE_404 = os_env("SAVE_404", "false").lower() == "true"
+USER_AGENT = os_env("USER_AGENT", "Mozilla/5.0 (GenericCrawler/1.0)")
+INSIGHTS_KEY = os_env("APPINSIGHTS_INSTRUMENTATIONKEY", "")
+RETRY_COUNT = int(os_env("RETRY_COUNT", "3"))
+RETRY_BACKOFF = float(os_env("RETRY_BACKOFF_FACTOR", "2"))
+OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
+OPENAI_API_KEY = os_env("AZURE_OPENAI_API_KEY")
+OPENAI_API_VERSION = os_env("AZURE_OPENAI_API_VERSION", "2023-05-15")
+OPENAI_AUTH_METHOD = os_env("AZURE_OPENAI_AUTH_METHOD", "managedidentity")
+OPENAI_CLIENT_ID = os_env("AZURE_OPENAI_CLIENT_ID")
 EMBEDDING_DEPLOYMENT_NAME = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME", "myproject-text-embedding-ada-002") # This is the CUSTOM name YOU give the model (often the same as the actual).
 EMBEDDING_MODEL_NAME = os.environ.get("AZURE_OPENAI_EMBEDDING_MODEL_NAME", "text-embedding-ada-002") # This is the actual model name.
 EMBEDDING_TOKEN_LIMIT = int(os_env("EMBEDDING_TOKEN_LIMIT", "8191")) # Default to 8191 for ada-002 and 3-small
 
-# ----------- BlobServiceClient Auth Logic -----------
-if STORAGE_CONNECTION_METHOD == "connectionstring":
-    blob_service = BlobServiceClient.from_connection_string(STORAGE_CONNECTION_STRING)
-else:
-    if USER_ASSIGNED_CLIENT_ID:
-        cred = ManagedIdentityCredential(client_id=USER_ASSIGNED_CLIENT_ID)
-    else:
-        cred = DefaultAzureCredential()
-    blob_service = BlobServiceClient(
-        account_url=f"https://{STORAGE_ACCOUNT}.blob.core.windows.net",
-        credential=cred
-    )
+# Additional missing constants
+INCLUDE_DOCX = os_env("INCLUDE_DOCX", "true").lower() == "true"
+INCLUDE_XLSX = os_env("INCLUDE_XLSX", "true").lower() == "true"
+MAX_WORKERS = int(os_env("MAX_WORKERS", "4"))
+TOKEN_OVERLAP = int(os_env("TOKEN_OVERLAP", "300"))
 
+# ----------- BlobServiceClient Auth Logic -----------
+def create_blob_service_client():
+    """
+    Create Azure Blob Storage client based on the authentication method.
+    Supports three methods: connectionstring, managedidentity (user-assigned), managedidentity (system-assigned)
+    """
+    if STORAGE_AUTH_METHOD.lower() == "connectionstring":
+        if not STORAGE_CONNECTION_STRING:
+            raise ValueError("STORAGE_CONNECTION_STRING must be set when using connectionstring authentication method")
+        log(f"Creating Blob Storage client with connection string authentication")
+        return BlobServiceClient.from_connection_string(STORAGE_CONNECTION_STRING)
+    elif STORAGE_AUTH_METHOD.lower() == "managedidentity":
+        log(f"Creating Blob Storage client with managed identity authentication")
+        if STORAGE_CLIENT_ID:
+            # Use user-assigned managed identity
+            log(f"Using user-assigned managed identity for storage: {STORAGE_CLIENT_ID}")
+            credential = ManagedIdentityCredential(client_id=STORAGE_CLIENT_ID)
+        else:
+            # Use system-assigned managed identity
+            log(f"Using system-assigned managed identity for storage")
+            credential = DefaultAzureCredential()
+
+        return BlobServiceClient(
+            account_url=f"https://{STORAGE_ACCOUNT}.blob.core.windows.net",
+            credential=credential
+        )
+    else:
+        raise ValueError(f"Unsupported storage authentication method: {STORAGE_AUTH_METHOD}. Supported methods: 'connectionstring', 'managedidentity'")
+
+# ----------- OpenAI Client Auth Logic -----------
+def create_openai_client():
+    """
+    Create Azure OpenAI client based on the authentication method.
+    Supports three methods: apikey, managedidentity (user-assigned), managedidentity (system-assigned)
+    """
+    if OPENAI_AUTH_METHOD.lower() == "apikey":
+        if not OPENAI_API_KEY:
+            raise ValueError("AZURE_OPENAI_API_KEY must be set when using apikey authentication method")
+        log(f"Creating OpenAI client with API key authentication")
+        return openai.AzureOpenAI(
+            api_key=OPENAI_API_KEY,
+            api_version=OPENAI_API_VERSION,
+            azure_endpoint=OPENAI_ENDPOINT
+        )
+    elif OPENAI_AUTH_METHOD.lower() == "managedidentity":
+        log(f"Creating OpenAI client with managed identity authentication")
+        if OPENAI_CLIENT_ID:
+            # Use user-assigned managed identity
+            log(f"Using user-assigned managed identity for OpenAI: {OPENAI_CLIENT_ID}")
+            credential = ManagedIdentityCredential(client_id=OPENAI_CLIENT_ID)
+        else:
+            # Use system-assigned managed identity
+            log(f"Using system-assigned managed identity for OpenAI")
+            credential = DefaultAzureCredential()
+
+        # Create a token provider function for Azure OpenAI
+        def get_bearer_token_provider():
+            token = credential.get_token("https://cognitiveservices.azure.com/.default")
+            return token.token
+
+        return openai.AzureOpenAI(
+            azure_ad_token_provider=get_bearer_token_provider,
+            api_version=OPENAI_API_VERSION,
+            azure_endpoint=OPENAI_ENDPOINT
+        )
+    else:
+        raise ValueError(f"Unsupported OpenAI authentication method: {OPENAI_AUTH_METHOD}. Supported methods: 'apikey', 'managedidentity'")
+
+# Initialize blob service client
+blob_service = create_blob_service_client()
 content_container = blob_service.get_container_client(CONTENT_CONT)
 logs_container = blob_service.get_container_client(LOGS_CONT)
-
 
 visited = set()
 documents = []
@@ -127,17 +189,13 @@ def get_embedding_aoai(text, client=None):
         return None
 
     if client is None:
-        client = openai.AzureOpenAI(
-            api_key=api_key,
-            api_version=api_version,
-            azure_endpoint=endpoint
-        )
+        client = create_openai_client()
     try:
         response = client.embeddings.create(
             input=[text],
             model=EMBEDDING_DEPLOYMENT_NAME
         )
-        log(f"Embedding generated for chunk ({len(text)} chars) using model {EMBEDDING_DEPLOYMENT_NAME} (api_version={api_version})")
+        log(f"Embedding generated for chunk ({len(text)} chars) using model {EMBEDDING_DEPLOYMENT_NAME} (api_version={OPENAI_API_VERSION})")
         return response.data[0].embedding
     except Exception as e:
         log(f"Embedding generation failed: {e}")
@@ -361,11 +419,7 @@ def emit_chunks(url, text, last_mod):
     Split text into token-length chunks (for Azure OpenAI embedding), upload as JSON docs.
     """
     windows = split_by_tokens(text)
-    embedding_client = openai.AzureOpenAI(
-        api_key=api_key,
-        api_version=api_version,
-        azure_endpoint=endpoint
-    )
+    embedding_client = create_openai_client()
     for idx, chunk in enumerate(windows, 1):
         if not chunk or not chunk.strip():
             log(f"Skipping empty chunk {idx} for {url}")
